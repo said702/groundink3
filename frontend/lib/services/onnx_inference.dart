@@ -12,6 +12,7 @@ import 'package:onnxruntime/src/bindings/onnxruntime_bindings_generated.dart'
 import 'package:image/image.dart' as img;
 
 import 'character_decoder.dart';
+import 'letter_mask.dart';
 
 /// Offline-ONNX-Inferenz für Wort- und Zeichenerkennung.
 /// Ersetzt den FastAPI-Backend-Aufruf durch lokale ONNX-Runtime.
@@ -372,8 +373,11 @@ class OnnxInference {
       'z'
     ];
 
-    // Output: [1, 66, 1344] = xywh(4), class scores(62).
+    // Output 0: [1, 98, 1344] = xywh(4), class scores(62), mask
+    // coefficients(32); output 1: [1, 32, 64, 64] mask prototypes.
+    // A detection model without masks returns only [1, 66, 1344].
     const numClasses = 62;
+    const maskChannels = LetterMask.protoCount;
 
     final results = <Map<String, dynamic>>[];
 
@@ -398,8 +402,11 @@ class OnnxInference {
     }
 
     final _FloatTensor? tensor;
+    Float32List? prototypes;
     try {
       tensor = _readChannelTensor(outputValue);
+      final protoValue = outputs.length > 1 ? outputs[1] : null;
+      if (protoValue != null) prototypes = _readFloats(protoValue);
     } catch (e) {
       releaseNative();
       rethrow;
@@ -441,26 +448,103 @@ class OnnxInference {
       final gx2 = wordBbox[0] + cx2;
       final gy2 = wordBbox[1] + cy2;
 
-      rawResults.add(CharDetection(gx1, gy1, gx2, gy2, conf, bestCls));
+      rawResults.add(
+          CharDetection(gx1, gy1, gx2, gy2, conf, bestCls, index: d));
     }
 
     // Release the native tensors after decoding (all outputs).
     releaseNative();
 
+    final hasMasks = prototypes != null &&
+        prototypes.length ==
+            maskChannels * LetterMask.protoSize * LetterMask.protoSize &&
+        numValues >= 4 + numClasses + maskChannels;
+    final scaledWidth = (wordCrop.width * scale).round().clamp(1, inputSize);
+    final scaledHeight = (wordCrop.height * scale).round().clamp(1, inputSize);
+
     for (final det in CharacterDecoder.decode(rawResults)) {
+      final box = [det.x1, det.y1, det.x2, det.y2];
+      Float32List? maskProbabilities;
+      if (hasMasks && det.index >= 0) {
+        final d = det.index;
+        final coefficients = Float32List(maskChannels);
+        for (var k = 0; k < maskChannels; k++) {
+          coefficients[k] = data[(4 + numClasses + k) * numDetections + d];
+        }
+        maskProbabilities = LetterMask.probabilities(
+          coefficients: coefficients,
+          prototypes: prototypes,
+          cx: data[d],
+          cy: data[numDetections + d],
+          w: data[2 * numDetections + d],
+          h: data[3 * numDetections + d],
+          left: padX,
+          top: padY,
+          scaledWidth: scaledWidth,
+          scaledHeight: scaledHeight,
+          cropWidth: wordCrop.width,
+          cropHeight: wordCrop.height,
+          originX: wordBbox[0],
+          originY: wordBbox[1],
+          box: box,
+        );
+      }
       results.add({
         'char': det.classIndex < classNames.length
             ? classNames[det.classIndex]
             : '?',
-        'bbox': [det.x1, det.y1, det.x2, det.y2],
+        'bbox': box,
         'contour': <List<int>>[],
         'mask': null,
         'maskW': null,
         'maskH': null,
+        // Predicted outline (see LetterMask), or null without mask outputs.
+        'maskProbabilities': maskProbabilities,
         'confidence': det.confidence,
       });
     }
     return results;
+  }
+
+  /// Copies all values of a float tensor (any rank, batch 0 first), or
+  /// returns null for other element types.
+  static Float32List? _readFloats(OrtValue value) {
+    final api = OrtEnv.instance.ortApiPtr.ref;
+    final infoPtrPtr = calloc<ffi.Pointer<bg.OrtTensorTypeAndShapeInfo>>();
+    final typePtr = calloc<ffi.Int32>();
+    final countPtr = calloc<ffi.Size>();
+    final dataPtrPtr = calloc<ffi.Pointer<ffi.Float>>();
+    ffi.Pointer<bg.OrtTensorTypeAndShapeInfo> info = ffi.nullptr;
+    try {
+      OrtStatus.checkOrtStatus(api.GetTensorTypeAndShape.asFunction<
+              bg.OrtStatusPtr Function(ffi.Pointer<bg.OrtValue>,
+                  ffi.Pointer<ffi.Pointer<bg.OrtTensorTypeAndShapeInfo>>)>()(
+          value.ptr, infoPtrPtr));
+      info = infoPtrPtr.value;
+      OrtStatus.checkOrtStatus(api.GetTensorElementType.asFunction<
+          bg.OrtStatusPtr Function(ffi.Pointer<bg.OrtTensorTypeAndShapeInfo>,
+              ffi.Pointer<ffi.Int32>)>()(info, typePtr));
+      if (typePtr.value != ONNXTensorElementDataType.float.value) return null;
+      OrtStatus.checkOrtStatus(api.GetTensorShapeElementCount.asFunction<
+          bg.OrtStatusPtr Function(ffi.Pointer<bg.OrtTensorTypeAndShapeInfo>,
+              ffi.Pointer<ffi.Size>)>()(info, countPtr));
+      final count = countPtr.value;
+      if (count == 0) return null;
+      OrtStatus.checkOrtStatus(api.GetTensorMutableData.asFunction<
+              bg.OrtStatusPtr Function(
+                  ffi.Pointer<bg.OrtValue>, ffi.Pointer<ffi.Pointer<ffi.Void>>)>()(
+          value.ptr, dataPtrPtr.cast()));
+      return Float32List.fromList(dataPtrPtr.value.asTypedList(count));
+    } finally {
+      if (info != ffi.nullptr) {
+        api.ReleaseTensorTypeAndShapeInfo.asFunction<
+            void Function(ffi.Pointer<bg.OrtTensorTypeAndShapeInfo>)>()(info);
+      }
+      calloc.free(infoPtrPtr);
+      calloc.free(typePtr);
+      calloc.free(countPtr);
+      calloc.free(dataPtrPtr);
+    }
   }
 
   /// Reads a `[1, channels, count]` float tensor into a flat buffer.

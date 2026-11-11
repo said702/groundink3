@@ -306,14 +306,27 @@ class OfflineDetector {
       final text = sortedChars.map((c) => c['char'] as String).join().trim();
       if (text.isEmpty) continue;
 
+      // Ink of each letter: with the predicted letter outlines when the
+      // model returns them, otherwise all dark pixels in the letter's box.
+      final boxes = [
+        for (final c in sortedChars) (c['bbox'] as List).cast<int>()
+      ];
+      final masks = [
+        for (final c in sortedChars) c['maskProbabilities'] as Float32List?
+      ];
+      final inks = masks.every((m) => m != null)
+          ? CharacterInk.extractWithMasks(
+              image, boxes, [for (final m in masks) m!])
+          : [for (final b in boxes) CharacterInk.extract(image, b)];
+
+      var index = 0;
       final characters = sortedChars
           .map((c) => CharacterResult(
                 char: c['char'] as String,
                 bbox: (c['bbox'] as List).cast<int>(),
                 contour: (c['contour'] as List).cast<List<int>>(),
                 confidence: c['confidence'] as double,
-                inkRuns:
-                    CharacterInk.extract(image, (c['bbox'] as List).cast<int>()),
+                inkRuns: inks[index++],
                 mask: c['mask'] != null
                     ? (c['mask'] as List)
                         .map((row) => (row as List)

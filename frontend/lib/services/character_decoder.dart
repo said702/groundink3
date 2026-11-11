@@ -7,8 +7,12 @@ class CharDetection {
   final double confidence;
   final int classIndex;
 
+  /// Position of the detection in the model output, or -1.
+  final int index;
+
   const CharDetection(
-      this.x1, this.y1, this.x2, this.y2, this.confidence, this.classIndex);
+      this.x1, this.y1, this.x2, this.y2, this.confidence, this.classIndex,
+      {this.index = -1});
 
   double get width => math.max(1e-6, (x2 - x1).toDouble());
   double get height => math.max(1e-6, (y2 - y1).toDouble());

@@ -9,16 +9,19 @@ The app bundles these runtime assets in `assets/models/`:
 
 - `word_detection_model.onnx`: YOLO26n Nano word detection (input size:
   `640 x 640` pixels).
-- `char_model_nano_256.onnx`: YOLO26n Nano character detection, one box and
-  class per letter (input size: `256 x 256` pixels). It was trained as a
-  segmentation model on the ink outline of every letter; the mask outputs are
-  removed from the file because the app only uses the boxes and classes.
+- `char_model_nano_256.onnx`: YOLO26n Nano character segmentation: one box,
+  class and outline (mask) per letter (input size: `256 x 256` pixels). It was
+  trained on the ink outline of every letter.
 - `english_lm.bin.gz`: the spelling model — the English word list (the same
   160,572 words as before), word frequencies, word-pair statistics, and the
   words that are never suggested.
 
 Character regions are mapped back to the source image so spelling feedback can
-highlight the corresponding handwritten character. The ink color of each word
+highlight the corresponding handwritten character. The highlight colors the
+dark pixels in the letter's box that the letter's predicted outline covers
+(mask probability above 0.2 and higher than that of any other letter), so
+where letter boxes overlap, the ink of the neighboring letters stays as it is
+(`lib/services/letter_mask.dart`, `CharacterInk.extractWithMasks`). The ink color of each word
 is measured as well: on red, pink or orange handwriting the suspect letters are
 highlighted in blue instead of red.
 
